@@ -1,0 +1,60 @@
+From a341c6991665c1a6ad94bcb1e3cabbb0b15100ed Mon Sep 17 00:00:00 2001
+From: Rahul Pon <theflyingrahul@gmail.com>
+Date: Wed, 5 Aug 2026 15:09:58 +0530
+Subject: [PATCH 41/42] hybris: always regenerate the linker configuration
+
+do_update_linker_config() skips regeneration when IsApexUpdatable() is false,
+because upstream assumes first_stage_init already generated a complete linker
+configuration. droid-hal-init never runs first_stage_init, and this device
+reports APEXes as non-updatable (ro.apex.updatable is unset), so the early
+return made every update_linker_config in init.rc a silent no-op.
+
+The effect is that /linkerconfig/ld.config.txt keeps only the minimal bootstrap
+configuration, vendor processes never get the VNDK namespace, and they resolve
+libbinder.so to /system/lib64 instead of /apex/com.android.vndk.v30. Those two
+copies use different Parcel headers ('SYST' vs 'VNDR'), so binder transactions
+between them are rejected by Parcel::enforceInterface().
+
+Only the builtins.cpp hunk is kept. The original version of this patch also
+edited SwitchToDefaultMountNamespace(), but that hunk sits inside
+'#ifdef DISABLED_FOR_HYBRIS_SUPPORT', a macro that is defined nowhere in the
+tree, so it was dead code on every hybris build.
+
+Change-Id: Ib1b91d9301f338a34cfde2808a8094a4b562d663
+---
+ init/builtins.cpp | 17 +++++++++--------
+ 1 file changed, 9 insertions(+), 8 deletions(-)
+
+diff --git a/init/builtins.cpp b/init/builtins.cpp
+index bc5f66b4b..a1cb43f53 100644
+--- a/init/builtins.cpp
++++ b/init/builtins.cpp
+@@ -1250,19 +1250,20 @@ static Result<void> GenerateLinkerConfiguration() {
+     return {};
+ }
+ 
+-static bool IsApexUpdatable() {
++// HYBRIS: kept for parity with upstream but no longer called; maybe_unused so
++// -Wunused-function cannot break the build. mount_namespace.cpp has its own copy.
++[[maybe_unused]] static bool IsApexUpdatable() {
+     static bool updatable = android::sysprop::ApexProperties::updatable().value_or(false);
+     return updatable;
+ }
+ 
+ static Result<void> do_update_linker_config(const BuiltinArguments&) {
+-    // If APEX is not updatable, then all APEX information are already included in the first
+-    // linker config generation, so there is no need to update linker configuration again.
+-    if (IsApexUpdatable()) {
+-        return GenerateLinkerConfiguration();
+-    }
+-
+-    return {};
++    // HYBRIS: upstream skips this when APEXes are not updatable, assuming
++    // first_stage_init already generated a complete configuration. droid-hal-init
++    // never runs first_stage_init and this device reports APEXes as non-updatable,
++    // so the early return made every update_linker_config a silent no-op and vendor
++    // processes never got the VNDK namespace. Always regenerate; it is idempotent.
++    return GenerateLinkerConfiguration();
+ }
+ 
+ static Result<void> parse_apex_configs() {

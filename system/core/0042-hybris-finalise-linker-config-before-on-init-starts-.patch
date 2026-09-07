@@ -1,0 +1,62 @@
+From 30a8aac91ce4b31fb70919a93e54ac678b1529b8 Mon Sep 17 00:00:00 2001
+From: Rahul Pon <theflyingrahul@gmail.com>
+Date: Wed, 5 Aug 2026 00:00:00 +0530
+Subject: [PATCH 42/42] hybris: finalise linker config before `on init` starts
+ vendor services
+
+On hybris the mount-namespace machinery is compiled out
+(DISABLED_FOR_HYBRIS_SUPPORT), so `enter_default_mount_ns` in `on post-fs-data`
+is the only thing that swaps /linkerconfig from the bootstrap configuration to
+the APEX-aware default one. That happens after `on init` has already started
+servicemanager, vndservicemanager and the early vendor HALs, so those processes
+link against /system/lib64/libbinder.so (kHeader 'SYST') rather than the VNDK
+copy in /apex/com.android.vndk.v30 (kHeader 'VNDR').
+
+vndservicemanager is the context manager for /dev/vndbinder, so every vendor
+client's Parcel::enforceInterface() fails with
+
+    Expecting header 0x53595354 but found 0x564e4452. Mixing copies of libbinder?
+
+and no service can be looked up on /dev/vndbinder. In particular
+android.hardware.graphics.composer@2.1-service never resolves display.qservice,
+exits(1), and is restarted by init every ~5s forever, so lipstick never gets a
+composer and the UI never appears. Killing vndservicemanager by hand works
+around it because init then respawns it after the default linker configuration
+is in place.
+
+Bind and regenerate the default linker configuration at the end of early-init
+instead. APEXes are already activated at that point (SetupFlattenedApexes() runs
+in SecondStageMain before any action is processed), so the later
+enter_default_mount_ns / perform_apex_config become harmless no-ops.
+
+Verified on lenovo/karatep (MSM8937, hybris-18.1): vndservicemanager now loads
+/apex/com.android.vndk.v30/lib64/libbinder.so at 13s, the composer starts once
+instead of crash-looping, "Mixing copies of libbinder" disappears from logcat,
+and lipstick reaches the UI at ~77s with no manual intervention.
+
+Change-Id: I2f0a3c4d5e6b7a8091c2d3e4f5a6b7c8d9e0f1a2
+---
+ rootdir/init.rc | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/rootdir/init.rc b/rootdir/init.rc
+index ef388a63d..455304eee 100644
+--- a/rootdir/init.rc
++++ b/rootdir/init.rc
+@@ -73,6 +73,16 @@ on early-init
+     # Generate linker config based on apex mounted in bootstrap namespace
+     update_linker_config
+ 
++    # HYBRIS: swap in the default linker configuration here, not at
++    # post-fs-data. The mount-namespace machinery is compiled out on hybris, so
++    # the post-fs-data switch lands after `on init` has already started
++    # vndservicemanager and the early vendor HALs, which then link the /system
++    # copy of libbinder ('SYST') instead of the VNDK one ('VNDR') and cannot
++    # talk to each other over /dev/vndbinder. APEXes are already activated
++    # here, so the later calls become no-ops.
++    enter_default_mount_ns
++    update_linker_config
++
+     # These must already exist by the time boringssl_self_test32 / boringssl_self_test64 run.
+     mkdir /dev/boringssl 0755 root root
+     mkdir /dev/boringssl/selftest 0755 root root
